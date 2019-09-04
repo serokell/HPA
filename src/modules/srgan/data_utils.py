@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from os import listdir
 from glob import glob
 from os.path import join
@@ -16,6 +17,12 @@ def is_image_file(filename):
 def calculate_valid_crop_size(crop_size, upscale_factor):
     return crop_size - (crop_size % upscale_factor)
 
+def rec_mk_img_paths(row, prefix):
+    return [
+        [(prefix + '/{}/Plate{}/{}_s{}_w{}.png').format(row['experiment'], row['plate'], row['well'], site, ch)
+         for ch in range(1, 7)]
+        for site in [1, 2]
+    ]
 
 def train_hr_transform(crop_size):
     return Compose([
@@ -47,6 +54,15 @@ def display_transform():
     ])
 
 #
+# Abstract image dataset instances
+#
+
+# class SRGANDataset(Dataset):
+#     def __init__(self, dataset_dir, *args, **kwargs):
+#         super(SRGANDataset, self).__init__()
+        
+
+#
 # HPA-adapted dataset instances
 #
 
@@ -66,7 +82,6 @@ class HPATrainDatasetFromFolder(Dataset):
 
     def __getitem__(self, index):
         
-
         image = np.stack([ 
             cv2.imread(self.image_filenames[index].format(colour), -1) 
             for colour in ['blue', 'red', 'green', 'yellow']
@@ -128,6 +143,62 @@ class HPAValDatasetFromFolder(Dataset):
     def __len__(self):
         return len(self.image_filenames)
 
+#
+# Recursion-adapted dataset instances
+#
+ 
+class RecursionTrainDatasetFromFolder(Dataset):
+    def __init__(self, dataset_dir, crop_size, upscale_factor):
+        super(RecursionTrainDatasetFromFolder, self).__init__()
+        
+        reference_table = pd.read_csv(dataset_dir + '.csv')
+        self.image_filenames = []
+        for (idx, row) in reference_table.iterrows():
+            self.image_filenames += rec_mk_img_paths(row, dataset_dir)
+            
+        crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
+        self.hr_transform = train_hr_transform(crop_size)
+        self.lr_transform = train_lr_transform(crop_size, upscale_factor)
+    
+    def __getitem__(self, index):
+        hr_image_raw = np.stack([
+            cv2.imread(img, -1) for img in self.image_filenames[index]
+        ], axis=-1).mean(-1).astype(np.uint8)
+        hr_image = self.hr_transform(Image.fromarray(hr_image_raw))
+        lr_image = self.lr_transform(hr_image)
+        return lr_image, hr_image
+    
+    def __len__(self):
+        return len(self.image_filenames)
+        
+class RecursionValDatasetFromFolder(Dataset):
+    def __init__(self, dataset_dir, upscale_factor):
+        super(RecursionValDatasetFromFolder, self).__init__()
+        
+        reference_table = pd.read_csv(dataset_dir + '.csv')
+        self.image_filenames = []
+        for (idx, row) in reference_table.iterrows():
+            self.image_filenames += rec_mk_img_paths(row, dataset_dir)
+    
+        self.upscale_factor = upscale_factor
+        
+    def __getitem__(self, index):
+        hr_image_raw = np.stack([
+            cv2.imread(img, -1) for img in self.image_filenames[index]
+        ], axis=-1).mean(-1).astype(np.uint8)
+        hr_image = Image.fromarray(hr_image_raw)
+        w, h = hr_image.size
+        
+        crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
+        lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
+        hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
+        hr_image = CenterCrop(crop_size)(hr_image)
+        lr_image = lr_scale(hr_image)
+        hr_restore_img = hr_scale(lr_image)
+        return ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
+    
+    def __len__(self):
+        return len(self.image_filenames)
 
 #
 # Original SRGAN dataset instances
