@@ -7,17 +7,21 @@ from torch import nn
 from torchvision.models.vgg import vgg16
 
 class GeneratorLoss(nn.Module):
-    def __init__(self):
+    def __init__(self, perception_enabled=True):
         super(GeneratorLoss, self).__init__()
-        vgg = vgg16(pretrained=True)
-        sd = vgg.features[0].state_dict()
-        sd['weight'] = torch.unsqueeze(sd['weight'].sum(1), 1)
-        conv2d = nn.Conv2d(1, 64, 3, padding=1)
-        conv2d.load_state_dict(sd)
-        loss_network = nn.Sequential(conv2d, *list(vgg.features)[1:31]).eval()
-        for param in loss_network.parameters():
-            param.requires_grad = False
-        self.loss_network = loss_network
+        self.perception_enabled = perception_enabled
+        
+        if self.perception_enabled:
+            vgg = vgg16(pretrained=True)
+            sd = vgg.features[0].state_dict()
+            sd['weight'] = torch.unsqueeze(sd['weight'].sum(1), 1)
+            conv2d = nn.Conv2d(1, 64, 3, padding=1)
+            conv2d.load_state_dict(sd)
+            loss_network = nn.Sequential(conv2d, *list(vgg.features)[1:31]).eval()
+            for param in loss_network.parameters():
+                param.requires_grad = False
+            self.loss_network = loss_network
+            
         self.mse_loss = nn.MSELoss()
         self.tv_loss = TVLoss()
 
@@ -25,12 +29,16 @@ class GeneratorLoss(nn.Module):
         # Adversarial Loss
         adversarial_loss = torch.mean(1 - out_labels)
         # Perception Loss
-        perception_loss = self.mse_loss(self.loss_network(out_images), self.loss_network(target_images))
+        if self.perception_enabled:
+            perception_loss = self.mse_loss(self.loss_network(out_images), self.loss_network(target_images))
         # Image Loss
         image_loss = self.mse_loss(out_images, target_images)
         # TV Loss
         tv_loss = self.tv_loss(out_images)
-        return image_loss + 0.001 * adversarial_loss + 0.006 * perception_loss + 2e-8 * tv_loss
+        
+        if self.perception_enabled:
+            return image_loss + 0.001 * adversarial_loss + 0.006 * perception_loss + 2e-8 * tv_loss
+        return image_loss + 0.001 * adversarial_loss + 2e-8 * tv_loss
 
 
 class TVLoss(nn.Module):

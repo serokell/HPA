@@ -77,7 +77,7 @@ class HPATrainDatasetFromFolder(Dataset):
 
         self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
         self.crop_half = self.crop_size // 2
-        self.hr_transform = hpa_train_hr_transform(self.crop_size)
+        self.hr_transform = train_hr_transform(self.crop_size)
         self.lr_transform = train_lr_transform(self.crop_size, upscale_factor)
 
     def __getitem__(self, index):
@@ -87,26 +87,26 @@ class HPATrainDatasetFromFolder(Dataset):
             for colour in ['blue', 'red', 'green', 'yellow']
         ], axis=-1).mean(-1).astype(np.uint8)
 
-        mask = cv2.imread(self.image_filenames[index].format('centroids_masks'), -1) 
-        coords = np.array(np.where(mask)).T
+#         mask = cv2.imread(self.image_filenames[index].format('centroids_masks'), -1) 
+#         coords = np.array(np.where(mask)).T
 
-        if len(coords):
-            centroid = coords[np.random.randint(len(coords))]
-        else:
-            centroid = np.array([
-                np.random.randint(mask.shape[0]),
-                np.random.randint(mask.shape[1]),
-            ])
+#         if len(coords):
+#             centroid = coords[np.random.randint(len(coords))]
+#         else:
+#             centroid = np.array([
+#                 np.random.randint(mask.shape[0]),
+#                 np.random.randint(mask.shape[1]),
+#             ])
 
-        centroid = np.clip(
-            centroid, self.crop_half, np.array(mask.shape) - self.crop_half
-        ).astype(np.int)
-        image = image[
-            centroid[0] - self.crop_half: centroid[0] + self.crop_half,
-            centroid[1] - self.crop_half: centroid[1] + self.crop_half
-        ]
-        image = np.expand_dims(image, -1)
-        hr_image = self.hr_transform(image)
+#         centroid = np.clip(
+#             centroid, self.crop_half, np.array(mask.shape) - self.crop_half
+#         ).astype(np.int)
+#         image = image[
+#             centroid[0] - self.crop_half: centroid[0] + self.crop_half,
+#             centroid[1] - self.crop_half: centroid[1] + self.crop_half
+#         ]
+#         image = np.expand_dims(image, -1)
+        hr_image = self.hr_transform(Image.fromarray(image))
         lr_image = self.lr_transform(hr_image)
         return lr_image, hr_image
 
