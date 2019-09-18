@@ -53,6 +53,26 @@ def display_transform():
         ToTensor()
     ])
 
+def crop_nonblack(image, mask, crop_half):
+    coords = np.array(np.where(mask)).T
+
+    if len(coords):
+        centroid = coords[np.random.randint(len(coords))]
+    else:
+        centroid = np.array([
+            np.random.randint(mask.shape[0]),
+            np.random.randint(mask.shape[1]),
+        ])
+
+    centroid = np.clip(
+        centroid, crop_half, np.array(mask.shape) - crop_half
+    ).astype(np.int)
+    image = image[
+        centroid[0] - crop_half: centroid[0] + crop_half,
+        centroid[1] - crop_half: centroid[1] + crop_half
+    ]
+    return np.expand_dims(image, -1)
+
 #
 # Abstract image dataset instances
 #
@@ -65,6 +85,8 @@ def display_transform():
 #
 # HPA-adapted dataset instances
 #
+
+
 
 class HPATrainDatasetFromFolder(Dataset):
     def __init__(self, dataset_dir, crop_size, upscale_factor):
@@ -88,24 +110,8 @@ class HPATrainDatasetFromFolder(Dataset):
         ], axis=-1).mean(-1).astype(np.uint8)
 
         mask = cv2.imread(self.image_filenames[index].format('centroids_masks'), -1) 
-        coords = np.array(np.where(mask)).T
-
-        if len(coords):
-            centroid = coords[np.random.randint(len(coords))]
-        else:
-            centroid = np.array([
-                np.random.randint(mask.shape[0]),
-                np.random.randint(mask.shape[1]),
-            ])
-
-        centroid = np.clip(
-            centroid, self.crop_half, np.array(mask.shape) - self.crop_half
-        ).astype(np.int)
-        image = image[
-            centroid[0] - self.crop_half: centroid[0] + self.crop_half,
-            centroid[1] - self.crop_half: centroid[1] + self.crop_half
-        ]
-        image = np.expand_dims(image, -1)
+        image = crop_nonblack(image, mask, self.crop_half)
+        
         hr_image = self.hr_transform(image)
         lr_image = self.lr_transform(hr_image)
         return lr_image, hr_image
@@ -156,15 +162,19 @@ class RecursionTrainDatasetFromFolder(Dataset):
         for (idx, row) in reference_table.iterrows():
             self.image_filenames += rec_mk_img_paths(row, dataset_dir)
             
-        crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
-        self.hr_transform = train_hr_transform(crop_size)
-        self.lr_transform = train_lr_transform(crop_size, upscale_factor)
+        self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
+        self.hr_transform = hpa_train_hr_transform(self.crop_size)
+        self.lr_transform = train_lr_transform(self.crop_size, upscale_factor)
     
     def __getitem__(self, index):
         hr_image_raw = np.stack([
             cv2.imread(img, -1) for img in self.image_filenames[index]
         ], axis=-1).mean(-1).astype(np.uint8)
-        hr_image = self.hr_transform(Image.fromarray(hr_image_raw))
+        
+        mask = cv2.imread(self.image_filenames[index][0].replace('w1', 'centroids_masks'), -1)
+        image = crop_nonblack(image, mask, self.crop_size // 2)
+        
+        hr_image = self.hr_transform(image)
         lr_image = self.lr_transform(hr_image)
         return lr_image, hr_image
     
