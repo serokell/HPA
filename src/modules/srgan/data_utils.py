@@ -26,7 +26,7 @@ def rec_mk_img_paths(row, prefix):
 
 def train_hr_transform(crop_size):
     return Compose([
-        RandomCrop(crop_size),
+#         RandomCrop(crop_size),
         ToTensor(),
     ])
 
@@ -39,8 +39,8 @@ def hpa_train_hr_transform(crop_size):
 
 def train_lr_transform(crop_size, upscale_factor):
     return Compose([
-        ToPILImage(),
-        Resize(crop_size // upscale_factor, interpolation=Image.BICUBIC),
+#         ToPILImage(),
+#         Resize(crop_size // upscale_factor, interpolation=Image.BICUBIC),
         ToTensor()
     ])
 
@@ -54,24 +54,38 @@ def display_transform():
     ])
 
 def crop_nonblack(image, mask, crop_half):
-    coords = np.array(np.where(mask)).T
+    coords = np.array(np.where(mask))[:2].T
 
     if len(coords):
         centroid = coords[np.random.randint(len(coords))]
     else:
         centroid = np.array([
-            np.random.randint(mask.shape[0]),
-            np.random.randint(mask.shape[1]),
+            np.random.randint(image.shape[0]),
+            np.random.randint(image.shape[1]),
         ])
 
     centroid = np.clip(
-        centroid, crop_half, np.array(mask.shape) - crop_half
+        centroid, crop_half, np.array(image.shape)[:2] - crop_half
     ).astype(np.int)
     image = image[
         centroid[0] - crop_half: centroid[0] + crop_half,
         centroid[1] - crop_half: centroid[1] + crop_half
     ]
     return np.expand_dims(image, -1)
+
+
+def centr_crop(image, crop_size):
+    centroid = np.array([
+        image.shape[0] // 2,
+        image.shape[1] // 2
+    ])
+
+    image = image[
+        centroid[0] - crop_size // 2: centroid[0] + crop_size // 2,
+        centroid[1] - crop_size // 2: centroid[1] + crop_size // 2
+    ]
+    return np.expand_dims(image, -1)
+
 
 #
 # Abstract image dataset instances
@@ -155,7 +169,7 @@ class HPAValDatasetFromFolder(Dataset):
  
 class RecursionTrainDatasetFromFolder(Dataset):
     def __init__(self, dataset_dir, crop_size, upscale_factor):
-        super(RecursionTrainDatasetFromFolder, self).__init__()
+        super().__init__()
         
         reference_table = pd.read_csv(dataset_dir + '.csv')
         self.image_filenames = []
@@ -163,27 +177,36 @@ class RecursionTrainDatasetFromFolder(Dataset):
             self.image_filenames += rec_mk_img_paths(row, dataset_dir)
             
         self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
+        self.upscale_factor = upscale_factor
         self.hr_transform = hpa_train_hr_transform(self.crop_size)
         self.lr_transform = train_lr_transform(self.crop_size, upscale_factor)
     
     def __getitem__(self, index):
         hr_image_raw = np.stack([
             cv2.imread(img, -1) for img in self.image_filenames[index]
-        ], axis=-1).mean(-1).astype(np.uint8)
+        ], axis=-1).mean(-1)
         
         mask = cv2.imread(self.image_filenames[index][0].replace('w1', 'centroids_masks'), -1)
-        image = crop_nonblack(image, mask, self.crop_size // 2)
+        image = crop_nonblack(hr_image_raw, mask, self.crop_size // 2)
         
+        image = (image - image.min()) / (image.max() - image.min())
         hr_image = self.hr_transform(image)
-        lr_image = self.lr_transform(hr_image)
-        return lr_image, hr_image
+        image = cv2.resize(
+            image, 
+            (
+                self.crop_size // self.upscale_factor, 
+                self.crop_size // self.upscale_factor
+            ), interpolation=cv2.INTER_CUBIC
+        )
+        lr_image = self.lr_transform(image)
+        return lr_image.float(), hr_image.float()
     
     def __len__(self):
         return len(self.image_filenames)
         
 class RecursionValDatasetFromFolder(Dataset):
     def __init__(self, dataset_dir, upscale_factor):
-        super(RecursionValDatasetFromFolder, self).__init__()
+        super().__init__()
         
         reference_table = pd.read_csv(dataset_dir + '.csv')
         self.image_filenames = []
@@ -193,19 +216,27 @@ class RecursionValDatasetFromFolder(Dataset):
         self.upscale_factor = upscale_factor
         
     def __getitem__(self, index):
-        hr_image_raw = np.stack([
+        image = np.stack([
             cv2.imread(img, -1) for img in self.image_filenames[index]
-        ], axis=-1).mean(-1).astype(np.uint8)
-        hr_image = Image.fromarray(hr_image_raw)
-        w, h = hr_image.size
+        ], axis=-1).mean(-1)
+        image = (image - image.min()) / (image.max() - image.min())
+        w, h = image.shape[:2]
         
         crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
-        lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
-        hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
-        hr_image = CenterCrop(crop_size)(hr_image)
-        lr_image = lr_scale(hr_image)
-        hr_restore_img = hr_scale(lr_image)
-        return ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
+#         lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
+#         hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
+        hr_image = centr_crop(image, crop_size)
+        lr_image = cv2.resize(
+            hr_image, 
+            (
+                crop_size // self.upscale_factor, 
+                crop_size // self.upscale_factor
+            ), interpolation=cv2.INTER_CUBIC
+        )
+        hr_restore_img = cv2.resize(
+            lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+        
+        return ToTensor()(lr_image).float(), ToTensor()(hr_restore_img).float(), ToTensor()(hr_image).float()
     
     def __len__(self):
         return len(self.image_filenames)

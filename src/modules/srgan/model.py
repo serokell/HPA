@@ -4,6 +4,7 @@ Adaptation from https://github.com/leftthomas/SRGAN
 
 import math
 
+import torch
 import torch.nn.functional as F
 from torch import nn
 
@@ -13,6 +14,7 @@ class Generator(nn.Module):
 
         super(Generator, self).__init__()
         self.block1 = nn.Sequential(
+#             nn.BatchNorm2d(1),
             nn.Conv2d(1, 64, kernel_size=9, padding=4),
             nn.PReLU()
         )
@@ -39,13 +41,14 @@ class Generator(nn.Module):
         block7 = self.block7(block6)
         block8 = self.block8(block1 + block7)
 
-        return (F.tanh(block8) + 1) / 2
+        return (torch.tanh(block8) + 1) / 2
 
 
 class Discriminator(nn.Module):
     def __init__(self):
         super(Discriminator, self).__init__()
         self.net = nn.Sequential(
+#             nn.BatchNorm2d(1),
             nn.Conv2d(1, 64, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
 
@@ -85,7 +88,7 @@ class Discriminator(nn.Module):
 
     def forward(self, x):
         batch_size = x.size(0)
-        return F.sigmoid(self.net(x).view(batch_size))
+        return torch.sigmoid(self.net(x).view(batch_size))
 
 
 class ResidualBlock(nn.Module):
