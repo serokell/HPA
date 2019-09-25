@@ -13,7 +13,6 @@ from torchvision.transforms import Compose, RandomCrop, ToTensor, ToPILImage, Ce
 def is_image_file(filename):
     return any(filename.endswith(extension) for extension in ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG', '.tiff', '.TIFF'])
 
-
 def calculate_valid_crop_size(crop_size, upscale_factor):
     return crop_size - (crop_size % upscale_factor)
 
@@ -23,27 +22,6 @@ def rec_mk_img_paths(row, prefix):
          for ch in range(1, 7)]
         for site in [1, 2]
     ]
-
-def train_hr_transform(crop_size):
-    return Compose([
-#         RandomCrop(crop_size),
-        ToTensor(),
-    ])
-
-
-def hpa_train_hr_transform(crop_size):
-    return Compose([
-        ToTensor(),
-    ])
-
-
-def train_lr_transform(crop_size, upscale_factor):
-    return Compose([
-#         ToPILImage(),
-#         Resize(crop_size // upscale_factor, interpolation=Image.BICUBIC),
-        ToTensor()
-    ])
-
 
 def display_transform():
     return Compose([
@@ -71,7 +49,9 @@ def crop_nonblack(image, mask, crop_half):
         centroid[0] - crop_half: centroid[0] + crop_half,
         centroid[1] - crop_half: centroid[1] + crop_half
     ]
-    return np.expand_dims(image, -1)
+    if len(image.shape) == 2:
+        image = np.expand_dims(image, -1)
+    return image
 
 
 def centr_crop(image, crop_size):
@@ -84,59 +64,62 @@ def centr_crop(image, crop_size):
         centroid[0] - crop_size // 2: centroid[0] + crop_size // 2,
         centroid[1] - crop_size // 2: centroid[1] + crop_size // 2
     ]
-    return np.expand_dims(image, -1)
+    if len(image.shape) == 2:
+        image = np.expand_dims(image, -1)
+    return image
 
 
-#
-# Abstract image dataset instances
-#
-
-# class SRGANDataset(Dataset):
-#     def __init__(self, dataset_dir, *args, **kwargs):
-#         super(SRGANDataset, self).__init__()
-        
+def downsize_img(image, downscale_factor):
+    return cv2.resize(
+        image, (image.shape[0] // downscale_factor, image.shape[1] // downscale_factor),
+        interpolation=cv2.INTER_CUBIC)      
 
 #
 # HPA-adapted dataset instances
 #
 
 
-
 class HPATrainDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, crop_size, upscale_factor):
-        super(HPATrainDatasetFromFolder, self).__init__()
+    def __init__(self, dataset_dir, crop_size, upscale_factor, colorisation=False):
+        super().__init__()
         self.image_filenames = glob(join(dataset_dir, '*_red.png'))
         self.image_filenames = [ 
             p.replace('_red.png', '_{}.png') 
             for p in self.image_filenames 
         ]
-
+        self.colorisation = colorisation
+        self.upscale_factor = upscale_factor
         self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
         self.crop_half = self.crop_size // 2
-        self.hr_transform = hpa_train_hr_transform(self.crop_size)
-        self.lr_transform = train_lr_transform(self.crop_size, upscale_factor)
 
     def __getitem__(self, index):
         
         image = np.stack([ 
             cv2.imread(self.image_filenames[index].format(colour), -1) 
             for colour in ['blue', 'red', 'green', 'yellow']
-        ], axis=-1).mean(-1).astype(np.uint8)
+        ], axis=-1)
+        if self.colorisation:
+            imag = image.mean(-1).astype(np.uint8)
 
         mask = cv2.imread(self.image_filenames[index].format('centroids_masks'), -1) 
         image = crop_nonblack(image, mask, self.crop_half)
         
-        hr_image = self.hr_transform(image)
-        lr_image = self.lr_transform(hr_image)
-        return lr_image, hr_image
+        hr_image = (image - image.min()) / (image.max() - image.min())
+        lr_image = downsize_img(hr_image, self.upscale_factor)
+        if self.colorisation:
+            image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
+            lr_image = (image - image.min()) / (image.max() - image.min())
+
+        return ToTensor()(lr_image).float(), ToTensor()(hr_image).float()
 
     def __len__(self):
         return len(self.image_filenames)
 
 
 class HPAValDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor):
-        super(HPAValDatasetFromFolder, self).__init__()
+    def __init__(self, dataset_dir, upscale_factor, colorisation=False):
+        super().__init__()
+        self.colorisation = colorisation
         self.upscale_factor = upscale_factor
         self.image_filenames = glob(join(dataset_dir, '*_red.png'))
         self.image_filenames = [ 
@@ -145,20 +128,29 @@ class HPAValDatasetFromFolder(Dataset):
         ]
 
     def __getitem__(self, index):
-        hr_image = np.stack([ 
+        image = np .stack([ 
             cv2.imread(self.image_filenames[index].format(colour), -1) 
             for colour in ['blue', 'red', 'green', 'yellow']
-        ], axis=-1).mean(-1).astype(np.uint8)
-        hr_image = Image.fromarray(hr_image)
-        w, h = hr_image.size
+        ], axis=-1)
+        if self.colorisation:
+            imag = image.mean(-1).astype(np.uint8)
+
+        #hr_image = Image.fromarray(hr_image)
+        hr_image = (image - image.min()) / (image.max() - image.min())
+        w, h = hr_image.shape[:2]
 
         crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
-        lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
-        hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
-        hr_image = CenterCrop(crop_size)(hr_image)
-        lr_image = lr_scale(hr_image)
-        hr_restore_img = hr_scale(lr_image)
-        return ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
+        #lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
+        #hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
+        #hr_image = CenterCrop(crop_size)(hr_image)
+        hr_image = centr_crop(hr_image, crop_size)
+        lr_image = downsize_img(hr_image, self.upscale_factor)
+        hr_restore_img = cv2.resize(lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+        if self.colorisation:
+            image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
+            lr_image = (image - image.min()) / (image.max() - image.min())
+
+        return ToTensor()(lr_image).float(), ToTensor()(hr_restore_img).float(), ToTensor()(hr_image).float()
 
     def __len__(self):
         return len(self.image_filenames)
@@ -178,8 +170,6 @@ class RecursionTrainDatasetFromFolder(Dataset):
             
         self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
         self.upscale_factor = upscale_factor
-        self.hr_transform = hpa_train_hr_transform(self.crop_size)
-        self.lr_transform = train_lr_transform(self.crop_size, upscale_factor)
     
     def __getitem__(self, index):
         hr_image_raw = np.stack([
@@ -189,17 +179,9 @@ class RecursionTrainDatasetFromFolder(Dataset):
         mask = cv2.imread(self.image_filenames[index][0].replace('w1', 'centroids_masks'), -1)
         image = crop_nonblack(hr_image_raw, mask, self.crop_size // 2)
         
-        image = (image - image.min()) / (image.max() - image.min())
-        hr_image = self.hr_transform(image)
-        image = cv2.resize(
-            image, 
-            (
-                self.crop_size // self.upscale_factor, 
-                self.crop_size // self.upscale_factor
-            ), interpolation=cv2.INTER_CUBIC
-        )
-        lr_image = self.lr_transform(image)
-        return lr_image.float(), hr_image.float()
+        hr_image = (image - image.min()) / (image.max() - image.min())        
+        lr_image = downsize_img(image, self.upscale_factor)
+        return ToTensor()(lr_image).float(), ToTensor()(hr_image).float()
     
     def __len__(self):
         return len(self.image_filenames)
@@ -226,13 +208,7 @@ class RecursionValDatasetFromFolder(Dataset):
 #         lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
 #         hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
         hr_image = centr_crop(image, crop_size)
-        lr_image = cv2.resize(
-            hr_image, 
-            (
-                crop_size // self.upscale_factor, 
-                crop_size // self.upscale_factor
-            ), interpolation=cv2.INTER_CUBIC
-        )
+        lr_image = downsize_img(hr_image, self.upscale_factor)
         hr_restore_img = cv2.resize(
             lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
         
@@ -245,61 +221,61 @@ class RecursionValDatasetFromFolder(Dataset):
 # Original SRGAN dataset instances
 #
 
-class TrainDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, crop_size, upscale_factor):
-        super(TrainDatasetFromFolder, self).__init__()
-        self.image_filenames = [join(dataset_dir, x) for x in listdir(dataset_dir) if is_image_file(x)]
-        crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
-        self.hr_transform = train_hr_transform(crop_size)
-        self.lr_transform = train_lr_transform(crop_size, upscale_factor)
+# class TrainDatasetFromFolder(Dataset):
+#     def __init__(self, dataset_dir, crop_size, upscale_factor):
+#         super(TrainDatasetFromFolder, self).__init__()
+#         self.image_filenames = [join(dataset_dir, x) for x in listdir(dataset_dir) if is_image_file(x)]
+#         crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
+#         self.hr_transform = train_hr_transform(crop_size)
+#         self.lr_transform = train_lr_transform(crop_size, upscale_factor)
 
-    def __getitem__(self, index):
-        hr_image = self.hr_transform(Image.open(self.image_filenames[index]))
-        lr_image = self.lr_transform(hr_image)
-        return lr_image, hr_image
+#     def __getitem__(self, index):
+#         hr_image = self.hr_transform(Image.open(self.image_filenames[index]))
+#         lr_image = self.lr_transform(hr_image)
+#         return lr_image, hr_image
 
-    def __len__(self):
-        return len(self.image_filenames)
+#     def __len__(self):
+#         return len(self.image_filenames)
 
 
-class ValDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor):
-        super(ValDatasetFromFolder, self).__init__()
-        self.upscale_factor = upscale_factor
-        self.image_filenames = [join(dataset_dir, x) for x in listdir(dataset_dir) if is_image_file(x)]
+# class ValDatasetFromFolder(Dataset):
+#     def __init__(self, dataset_dir, upscale_factor):
+#         super(ValDatasetFromFolder, self).__init__()
+#         self.upscale_factor = upscale_factor
+#         self.image_filenames = [join(dataset_dir, x) for x in listdir(dataset_dir) if is_image_file(x)]
 
-    def __getitem__(self, index):
-        hr_image = Image.open(self.image_filenames[index])
-        w, h = hr_image.size
-        crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
-        lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
-        hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
-        hr_image = CenterCrop(crop_size)(hr_image)
-        lr_image = lr_scale(hr_image)
-        hr_restore_img = hr_scale(lr_image)
-        return ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
+#     def __getitem__(self, index):
+#         hr_image = Image.open(self.image_filenames[index])
+#         w, h = hr_image.size
+#         crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
+#         lr_scale = Resize(crop_size // self.upscale_factor, interpolation=Image.BICUBIC)
+#         hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
+#         hr_image = CenterCrop(crop_size)(hr_image)
+#         lr_image = lr_scale(hr_image)
+#         hr_restore_img = hr_scale(lr_image)
+#         return ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
 
-    def __len__(self):
-        return len(self.image_filenames)
+#     def __len__(self):
+#         return len(self.image_filenames)
     
     
-class TestDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor):
-        super(TestDatasetFromFolder, self).__init__()
-        self.lr_path = dataset_dir + '/SRF_' + str(upscale_factor) + '/data/'
-        self.hr_path = dataset_dir + '/SRF_' + str(upscale_factor) + '/target/'
-        self.upscale_factor = upscale_factor
-        self.lr_filenames = [join(self.lr_path, x) for x in listdir(self.lr_path) if is_image_file(x)]
-        self.hr_filenames = [join(self.hr_path, x) for x in listdir(self.hr_path) if is_image_file(x)]
+# class TestDatasetFromFolder(Dataset):
+#     def __init__(self, dataset_dir, upscale_factor):
+#         super(TestDatasetFromFolder, self).__init__()
+#         self.lr_path = dataset_dir + '/SRF_' + str(upscale_factor) + '/data/'
+#         self.hr_path = dataset_dir + '/SRF_' + str(upscale_factor) + '/target/'
+#         self.upscale_factor = upscale_factor
+#         self.lr_filenames = [join(self.lr_path, x) for x in listdir(self.lr_path) if is_image_file(x)]
+#         self.hr_filenames = [join(self.hr_path, x) for x in listdir(self.hr_path) if is_image_file(x)]
 
-    def __getitem__(self, index):
-        image_name = self.lr_filenames[index].split('/')[-1]
-        lr_image = Image.open(self.lr_filenames[index])
-        w, h = lr_image.size
-        hr_image = Image.open(self.hr_filenames[index])
-        hr_scale = Resize((self.upscale_factor * h, self.upscale_factor * w), interpolation=Image.BICUBIC)
-        hr_restore_img = hr_scale(lr_image)
-        return image_name, ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
+#     def __getitem__(self, index):
+#         image_name = self.lr_filenames[index].split('/')[-1]
+#         lr_image = Image.open(self.lr_filenames[index])
+#         w, h = lr_image.size
+#         hr_image = Image.open(self.hr_filenames[index])
+#         hr_scale = Resize((self.upscale_factor * h, self.upscale_factor * w), interpolation=Image.BICUBIC)
+#         hr_restore_img = hr_scale(lr_image)
+#         return image_name, ToTensor()(lr_image), ToTensor()(hr_restore_img), ToTensor()(hr_image)
 
-    def __len__(self):
-        return len(self.lr_filenames)
+#     def __len__(self):
+#         return len(self.lr_filenames)

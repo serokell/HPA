@@ -7,15 +7,16 @@ from torch import nn
 from torchvision.models.vgg import vgg16
 
 class GeneratorLoss(nn.Module):
-    def __init__(self, perception_enabled=True):
-        super(GeneratorLoss, self).__init__()
+    def __init__(self, out_channels=1, perception_enabled=True, **kwargs):
+        super().__init__()
         self.perception_enabled = perception_enabled
         
         if self.perception_enabled:
             vgg = vgg16(pretrained=True)
             sd = vgg.features[0].state_dict()
-            sd['weight'] = torch.unsqueeze(sd['weight'].sum(1), 1)
-            conv2d = nn.Conv2d(1, 64, 3, padding=1)
+            sd['weight'] = torch.cat(
+                [torch.unsqueeze(sd['weight'].sum(1), 1)] * out_channels, dim=1)
+            conv2d = nn.Conv2d(out_channels, 64, 3, padding=1)
             conv2d.load_state_dict(sd)
             loss_network = nn.Sequential(conv2d, *list(vgg.features)[1:31]).eval()
             for param in loss_network.parameters():

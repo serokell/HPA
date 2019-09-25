@@ -3,7 +3,7 @@ import os
 import easydict
 
 CROP_SIZE = 176
-UPSCALE_FACTOR = 4
+UPSCALE_FACTOR = 2
 
 MEAN = 0.0361812449991703
 STD = 0.0334203876554966
@@ -18,6 +18,8 @@ TRAIN_TEST_SPLIT = .85
 SEED = 42
 BBOXES_SIDE = 32
 
+COLORISATION = True
+
 PARAMS = easydict.EasyDict()
 PARAMS.LR = 1e-4
 PARAMS.BATCH_SIZE = 20
@@ -28,6 +30,10 @@ PARAMS.THRESHOLD = .5
 PARAMS.NUM_EPOCHS = 100
 PARAMS.CUDA_DEVICES = [0]
 
+PARAMS.COLORISATION = {
+    "in_channels": 1,
+    "out_channels": 4
+}
 
 
 PATHS = easydict.EasyDict()
