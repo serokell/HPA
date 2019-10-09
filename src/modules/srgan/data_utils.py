@@ -74,13 +74,25 @@ def downsize_img(image, downscale_factor):
         image, (image.shape[0] // downscale_factor, image.shape[1] // downscale_factor),
         interpolation=cv2.INTER_CUBIC)      
 
+def partial_channel_merge(image, merged_channels, not_merged_channels):
+    return np.concatenate((image[:, :, not_merged_channels],
+                           np.expand_dims(image[:, :, merged_channels].mean(-1), -1)),
+                          axis=2)
+
 #
 # HPA-adapted dataset instances
 #
 
+_hpa_channel_idxs = {
+    'blue': 0,
+    'red': 1,
+    'green': 2,
+    'yellow': 3,
+}
 
 class HPATrainDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, crop_size, upscale_factor, colorisation=False):
+    def __init__(self, dataset_dir, crop_size, upscale_factor, colorisation=False,
+                 merged_channels=None):
         super().__init__()
         self.image_filenames = glob(join(dataset_dir, '*_red.png'))
         self.image_filenames = [ 
@@ -88,18 +100,25 @@ class HPATrainDatasetFromFolder(Dataset):
             for p in self.image_filenames 
         ]
         self.colorisation = colorisation
+        if merged_channels is not None:
+            self.merged_channels = [_hpa_channel_idxs[ch] for ch in merged_channels]
+            self.not_merged_channels = [ch for ch in range(0, 4) if ch not in self.merged_channels]
+        else:
+            self.merged_channels = None
+           
         self.upscale_factor = upscale_factor
         self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
         self.crop_half = self.crop_size // 2
 
     def __getitem__(self, index):
-        
         image = np.stack([ 
             cv2.imread(self.image_filenames[index].format(colour), -1) 
             for colour in ['blue', 'red', 'green', 'yellow']
         ], axis=-1)
-        if self.colorisation:
-            imag = image.mean(-1).astype(np.uint8)
+        if not self.colorisation:
+            image = image.mean(-1).astype(np.uint8)
+        elif self.merged_channels is not None:
+            image = partial_channel_merge(image, self.merged_channels, self.not_merged_channels)
 
         mask = cv2.imread(self.image_filenames[index].format('centroids_masks'), -1) 
         image = crop_nonblack(image, mask, self.crop_half)
@@ -117,9 +136,15 @@ class HPATrainDatasetFromFolder(Dataset):
 
 
 class HPAValDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor, colorisation=False):
+    def __init__(self, dataset_dir, upscale_factor, colorisation=False, merged_channels=None):
         super().__init__()
         self.colorisation = colorisation
+        if merged_channels is not None:
+            self.merged_channels = [_hpa_channel_idxs[ch] for ch in merged_channels]
+            self.not_merged_channels = [ch for ch in range(0, 4) if ch not in self.merged_channels]
+        else:
+            self.merged_channels = None
+            
         self.upscale_factor = upscale_factor
         self.image_filenames = glob(join(dataset_dir, '*_red.png'))
         self.image_filenames = [ 
@@ -132,9 +157,11 @@ class HPAValDatasetFromFolder(Dataset):
             cv2.imread(self.image_filenames[index].format(colour), -1) 
             for colour in ['blue', 'red', 'green', 'yellow']
         ], axis=-1)
-        if self.colorisation:
-            imag = image.mean(-1).astype(np.uint8)
-
+        if not self.colorisation:
+            image = image.mean(-1).astype(np.uint8)
+        elif self.merged_channels is not None:
+            image = partial_channel_merge(image, self.merged_channels, self.not_merged_channels)
+    
         #hr_image = Image.fromarray(hr_image)
         hr_image = (image - image.min()) / (image.max() - image.min())
         w, h = hr_image.shape[:2]
@@ -145,11 +172,16 @@ class HPAValDatasetFromFolder(Dataset):
         #hr_image = CenterCrop(crop_size)(hr_image)
         hr_image = centr_crop(hr_image, crop_size)
         lr_image = downsize_img(hr_image, self.upscale_factor)
-        hr_restore_img = cv2.resize(lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+
         if self.colorisation:
             image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
             lr_image = (image - image.min()) / (image.max() - image.min())
 
+        hr_restore_img = cv2.resize(lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+        if self.colorisation:
+            ch_count = hr_image.shape[-1]
+            hr_restore_img = np.stack([hr_restore_img]*ch_count, axis=2)
+            
         return ToTensor()(lr_image).float(), ToTensor()(hr_restore_img).float(), ToTensor()(hr_image).float()
 
     def __len__(self):
@@ -158,36 +190,61 @@ class HPAValDatasetFromFolder(Dataset):
 #
 # Recursion-adapted dataset instances
 #
- 
+
+_rx_channel_idxs = {
+    'nuclei': 0,
+    'endoplasmic_reticuli': 1,
+    'actin': 2,
+    'nucleoli': 3,
+    'mitochondria': 4,
+    'golgi': 5
+}
+
 class RecursionTrainDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, crop_size, upscale_factor):
+    def __init__(self, dataset_dir, crop_size, upscale_factor, colorisation=False,
+                 merged_channels=None):
         super().__init__()
         
         reference_table = pd.read_csv(dataset_dir + '.csv')
         self.image_filenames = []
         for (idx, row) in reference_table.iterrows():
             self.image_filenames += rec_mk_img_paths(row, dataset_dir)
-            
+        
+        self.colorisation = colorisation
+        if merged_channels is not None:
+            self.merged_channels = [_rx_channel_idxs[ch] for ch in merged_channels]
+            self.not_merged_channels = [ch for ch in range(0, 6) if ch not in self.merged_channels]
+        else:
+            self.merged_channels = None
+        
         self.crop_size = calculate_valid_crop_size(crop_size, upscale_factor)
         self.upscale_factor = upscale_factor
     
     def __getitem__(self, index):
-        hr_image_raw = np.stack([
+        image = np.stack([
             cv2.imread(img, -1) for img in self.image_filenames[index]
-        ], axis=-1).mean(-1)
+        ], axis=-1)
+        if not self.colorisation:
+            image = image.mean(-1).astype(np.uint8)
+        elif self.merged_channels is not None:
+            image = partial_channel_merge(image, self.merged_channels, self.not_merged_channels)
         
         mask = cv2.imread(self.image_filenames[index][0].replace('w1', 'centroids_masks'), -1)
-        image = crop_nonblack(hr_image_raw, mask, self.crop_size // 2)
+        image = crop_nonblack(image, mask, self.crop_size // 2)
         
         hr_image = (image - image.min()) / (image.max() - image.min())        
         lr_image = downsize_img(image, self.upscale_factor)
+        if self.colorisation:
+            image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
+            lr_image = (image - image.min()) / (image.max() - image.min())
+        
         return ToTensor()(lr_image).float(), ToTensor()(hr_image).float()
     
     def __len__(self):
         return len(self.image_filenames)
         
 class RecursionValDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor):
+    def __init__(self, dataset_dir, upscale_factor, colorisation=False, merged_channels=None):
         super().__init__()
         
         reference_table = pd.read_csv(dataset_dir + '.csv')
@@ -195,12 +252,24 @@ class RecursionValDatasetFromFolder(Dataset):
         for (idx, row) in reference_table.iterrows():
             self.image_filenames += rec_mk_img_paths(row, dataset_dir)
     
+        self.colorisation = colorisation
+        if merged_channels is not None:
+            self.merged_channels = [_rx_channel_idxs[ch] for ch in merged_channels]
+            self.not_merged_channels = [ch for ch in range(0, 6) if ch not in self.merged_channels]
+        else:
+            self.merged_channels = None
+        
         self.upscale_factor = upscale_factor
         
     def __getitem__(self, index):
         image = np.stack([
             cv2.imread(img, -1) for img in self.image_filenames[index]
-        ], axis=-1).mean(-1)
+        ], axis=-1)
+        if not self.colorisation:
+            image = image.mean(-1).astype(np.uint8)
+        elif self.merged_channels is not None:
+            image = partial_channel_merge(image, self.merged_channels, self.not_merged_channels)
+            
         image = (image - image.min()) / (image.max() - image.min())
         w, h = image.shape[:2]
         
@@ -209,8 +278,16 @@ class RecursionValDatasetFromFolder(Dataset):
 #         hr_scale = Resize(crop_size, interpolation=Image.BICUBIC)
         hr_image = centr_crop(image, crop_size)
         lr_image = downsize_img(hr_image, self.upscale_factor)
+        if self.colorisation:
+            image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
+            lr_image = (image - image.min()) / (image.max() - image.min())
+        
         hr_restore_img = cv2.resize(
             lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+        
+        if self.colorisation:
+            ch_count = hr_image.shape[-1]
+            hr_restore_img = np.stack([hr_restore_img]*ch_count, axis=2)
         
         return ToTensor()(lr_image).float(), ToTensor()(hr_restore_img).float(), ToTensor()(hr_image).float()
     

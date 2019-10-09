@@ -32,7 +32,7 @@ PARAMS.CUDA_DEVICES = [0]
 
 PARAMS.COLORISATION = {
     "in_channels": 1,
-    "out_channels": 4
+    "out_channels": 3
 }
 
 
