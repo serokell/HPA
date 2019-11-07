@@ -1,14 +1,15 @@
 import numpy as np
 import pandas as pd
+import torch
+import cv2
+import torchvision.utils as utils
+
 from os import listdir
 from glob import glob
 from os.path import join
-import cv2
-
 from PIL import Image
 from torch.utils.data.dataset import Dataset
 from torchvision.transforms import Compose, RandomCrop, ToTensor, ToPILImage, CenterCrop, Resize
-
 
 def is_image_file(filename):
     return any(filename.endswith(extension) for extension in ['.png', '.jpg', '.jpeg', '.PNG', '.JPG', '.JPEG', '.tiff', '.TIFF'])
@@ -23,14 +24,12 @@ def rec_mk_img_paths(row, prefix):
         for site in [1, 2]
     ]
 
-def display_transform():
-    return Compose([
-        ToPILImage(),
-        Resize(400),
-        CenterCrop(400),
-        ToTensor()
-    ])
-
+def read_img_hpa(img_path_tpl):
+    return np.stack([ 
+        cv2.imread(img_path_tpl.format(colour), -1) 
+        for colour in ['blue', 'red', 'green', 'yellow']
+    ], axis=-1)
+            
 def crop_nonblack(image, mask, crop_half):
     coords = np.array(np.where(mask))[:2].T
 
@@ -68,8 +67,20 @@ def centr_crop(image, crop_size):
         image = np.expand_dims(image, -1)
     return image
 
+def display_transform(img_tensor):
+    img = np.transpose(img_tensor.numpy(), (1,2,0))
+    w, h = img.shape[:2]
+    if w > h:
+        new_w, new_h = int(w * 400 / h), 400
+    else:
+        new_w, new_h = 400, int(h * 400 / w)
+        
+    img = cv2.resize(img, (new_w, new_h))
+    return ToTensor()(centr_crop(img, 400))
 
 def downsize_img(image, downscale_factor):
+    if downscale_factor == 1:
+        return image
     return cv2.resize(
         image, (image.shape[0] // downscale_factor, image.shape[1] // downscale_factor),
         interpolation=cv2.INTER_CUBIC)      
@@ -79,6 +90,28 @@ def partial_channel_merge(image, merged_channels, not_merged_channels):
                            np.expand_dims(image[:, :, merged_channels].mean(-1), -1)),
                           axis=2)
 
+def normalize_img(image):
+    return (image - image.min()) / (image.max() - image.min())
+
+class ImageStacker:
+    def __init__(self, cols, rows):
+        self.cols = cols
+        self.rows = rows
+        self.images = []
+    
+    def add_row(self, *imgs):
+        assert len(imgs) == self.cols
+        processed_imgs = [
+            display_transform(img.data.cpu().squeeze(0))
+            for img in imgs
+        ]
+        self.images.extend(processed_imgs)
+    
+    def grids(self):
+        stacked = torch.stack(self.images)
+        chunked = torch.chunk(stacked, stacked.size(0) // (self.cols * self.rows))
+        return [utils.make_grid(img[:, :3], nrow=self.cols, padding=5) for img in chunked]
+    
 #
 # HPA-adapted dataset instances
 #
@@ -92,7 +125,7 @@ _hpa_channel_idxs = {
 
 class HPATrainDatasetFromFolder(Dataset):
     def __init__(self, dataset_dir, crop_size, upscale_factor, colorisation=False,
-                 merged_channels=None):
+                 merged_channels=None, normalization=True):
         super().__init__()
         self.image_filenames = glob(join(dataset_dir, '*_red.png'))
         self.image_filenames = [ 
@@ -100,6 +133,8 @@ class HPATrainDatasetFromFolder(Dataset):
             for p in self.image_filenames 
         ]
         self.colorisation = colorisation
+        self.normalization = normalization
+        
         if merged_channels is not None:
             self.merged_channels = [_hpa_channel_idxs[ch] for ch in merged_channels]
             self.not_merged_channels = [ch for ch in range(0, 4) if ch not in self.merged_channels]
@@ -123,11 +158,12 @@ class HPATrainDatasetFromFolder(Dataset):
         mask = cv2.imread(self.image_filenames[index].format('centroids_masks'), -1) 
         image = crop_nonblack(image, mask, self.crop_half)
         
-        hr_image = (image - image.min()) / (image.max() - image.min())
+        hr_image = normalize_img(image) if self.normalization else image
+            
         lr_image = downsize_img(hr_image, self.upscale_factor)
         if self.colorisation:
             image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
-            lr_image = (image - image.min()) / (image.max() - image.min())
+            lr_image = normalize_img(image) if self.normalization else image
 
         return ToTensor()(lr_image).float(), ToTensor()(hr_image).float()
 
@@ -136,9 +172,12 @@ class HPATrainDatasetFromFolder(Dataset):
 
 
 class HPAValDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor, colorisation=False, merged_channels=None):
+    def __init__(self, dataset_dir, upscale_factor, colorisation=False,
+                 merged_channels=None, normalization=True):
         super().__init__()
         self.colorisation = colorisation
+        self.normalization = normalization
+        
         if merged_channels is not None:
             self.merged_channels = [_hpa_channel_idxs[ch] for ch in merged_channels]
             self.not_merged_channels = [ch for ch in range(0, 4) if ch not in self.merged_channels]
@@ -163,7 +202,7 @@ class HPAValDatasetFromFolder(Dataset):
             image = partial_channel_merge(image, self.merged_channels, self.not_merged_channels)
     
         #hr_image = Image.fromarray(hr_image)
-        hr_image = (image - image.min()) / (image.max() - image.min())
+        hr_image = normalize_img(image) if self.normalization else image
         w, h = hr_image.shape[:2]
 
         crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
@@ -174,10 +213,14 @@ class HPAValDatasetFromFolder(Dataset):
         lr_image = downsize_img(hr_image, self.upscale_factor)
 
         if self.colorisation:
-            image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
-            lr_image = (image - image.min()) / (image.max() - image.min())
+            image = np.expand_dims(lr_image.astype(np.float).mean(-1), -1)
+            lr_image = normalize_img(image) if self.normalization else image
 
-        hr_restore_img = cv2.resize(lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+        if self.upscale_factor != 1:
+            hr_restore_img = cv2.resize(lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)
+        else:
+            hr_restore_img = lr_image.squeeze(-1)
+         
         if self.colorisation:
             ch_count = hr_image.shape[-1]
             hr_restore_img = np.stack([hr_restore_img]*ch_count, axis=2)
@@ -202,7 +245,7 @@ _rx_channel_idxs = {
 
 class RecursionTrainDatasetFromFolder(Dataset):
     def __init__(self, dataset_dir, crop_size, upscale_factor, colorisation=False,
-                 merged_channels=None):
+                 merged_channels=None, normalization=True):
         super().__init__()
         
         reference_table = pd.read_csv(dataset_dir + '.csv')
@@ -211,6 +254,7 @@ class RecursionTrainDatasetFromFolder(Dataset):
             self.image_filenames += rec_mk_img_paths(row, dataset_dir)
         
         self.colorisation = colorisation
+        self.normalization = normalization
         if merged_channels is not None:
             self.merged_channels = [_rx_channel_idxs[ch] for ch in merged_channels]
             self.not_merged_channels = [ch for ch in range(0, 6) if ch not in self.merged_channels]
@@ -232,11 +276,11 @@ class RecursionTrainDatasetFromFolder(Dataset):
         mask = cv2.imread(self.image_filenames[index][0].replace('w1', 'centroids_masks'), -1)
         image = crop_nonblack(image, mask, self.crop_size // 2)
         
-        hr_image = (image - image.min()) / (image.max() - image.min())        
+        hr_image = normalize_img(image) if self.normalization else image     
         lr_image = downsize_img(image, self.upscale_factor)
         if self.colorisation:
             image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
-            lr_image = (image - image.min()) / (image.max() - image.min())
+            lr_image = normalize_img(image) if self.normalization else image
         
         return ToTensor()(lr_image).float(), ToTensor()(hr_image).float()
     
@@ -244,7 +288,8 @@ class RecursionTrainDatasetFromFolder(Dataset):
         return len(self.image_filenames)
         
 class RecursionValDatasetFromFolder(Dataset):
-    def __init__(self, dataset_dir, upscale_factor, colorisation=False, merged_channels=None):
+    def __init__(self, dataset_dir, upscale_factor, colorisation=False,
+                 merged_channels=None, normalization=True):
         super().__init__()
         
         reference_table = pd.read_csv(dataset_dir + '.csv')
@@ -253,6 +298,7 @@ class RecursionValDatasetFromFolder(Dataset):
             self.image_filenames += rec_mk_img_paths(row, dataset_dir)
     
         self.colorisation = colorisation
+        self.normalization = normalization
         if merged_channels is not None:
             self.merged_channels = [_rx_channel_idxs[ch] for ch in merged_channels]
             self.not_merged_channels = [ch for ch in range(0, 6) if ch not in self.merged_channels]
@@ -270,7 +316,7 @@ class RecursionValDatasetFromFolder(Dataset):
         elif self.merged_channels is not None:
             image = partial_channel_merge(image, self.merged_channels, self.not_merged_channels)
             
-        image = (image - image.min()) / (image.max() - image.min())
+        image = normalize_img(image) if self.normalization else image
         w, h = image.shape[:2]
         
         crop_size = calculate_valid_crop_size(min(w, h), self.upscale_factor)
@@ -280,7 +326,7 @@ class RecursionValDatasetFromFolder(Dataset):
         lr_image = downsize_img(hr_image, self.upscale_factor)
         if self.colorisation:
             image = np.expand_dims(lr_image.astype(np.float).sum(-1), -1)
-            lr_image = (image - image.min()) / (image.max() - image.min())
+            lr_image = normalize_img(image) if self.normalization else image
         
         hr_restore_img = cv2.resize(
             lr_image, (crop_size, crop_size), interpolation=cv2.INTER_CUBIC)

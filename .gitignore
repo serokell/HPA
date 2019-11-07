@@ -6,6 +6,7 @@ __pycache__/
 # Data dirs
 data/
 srgan_training/
+pix2pix_training/
 
 # Data files
 *.pth
